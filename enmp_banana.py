@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple
 import requests
 import spotipy
 from PIL import Image, ImageDraw, ImageFont
-from spotipy.oauth2 import SpotifyClientCredentials
+from spotipy.oauth2 import SpotifyOAuth
 
 CANVAS_W, CANVAS_H = 1080, 1920
 SPOTIFY_GREEN = (30, 215, 96)
@@ -53,13 +53,23 @@ def fetch_playlist_meta(
     playlist_url: str,
     spotify_client_id: str,
     spotify_client_secret: str,
+    spotify_redirect_uri: str = "http://127.0.0.1:8888/callback",
     max_covers: int = 6,
+    cache_path: str = ".spotify_cache",
 ) -> PlaylistMeta:
-    """Client Credentials認証でSpotifyからメタ情報をまとめて取得する."""
+    """Authorization Code Flow認証でSpotifyからメタ情報をまとめて取得する.
+
+    初回のみ表示されるURLをブラウザで開いてSpotifyログイン → リダイレクト先URLを
+    プロンプトに貼り付けるとtokenがcache_pathに保存され、以降は自動で再利用される.
+    """
     sp = spotipy.Spotify(
-        auth_manager=SpotifyClientCredentials(
+        auth_manager=SpotifyOAuth(
             client_id=spotify_client_id,
             client_secret=spotify_client_secret,
+            redirect_uri=spotify_redirect_uri,
+            scope="playlist-read-private",
+            cache_path=cache_path,
+            open_browser=False,
         )
     )
     playlist_id = extract_playlist_id(playlist_url)
@@ -352,6 +362,7 @@ def make_thumbnail(
     playlist_url: str,
     spotify_client_id: str,
     spotify_client_secret: str,
+    spotify_redirect_uri: str = "http://127.0.0.1:8888/callback",
     provider: str = "gemini",
     gemini_api_key: Optional[str] = None,
     gemini_model: str = "gemini-2.5-flash-image",
@@ -359,10 +370,15 @@ def make_thumbnail(
     openai_model: str = "gpt-image-1",
     output_path: Optional[str] = "playlist_thumbnail.png",
     cta_text: str = "Let's listen on Spotify!",
+    cache_path: str = ".spotify_cache",
 ) -> Tuple[Image.Image, PlaylistMeta]:
     """エンドツーエンドでサムネを作って(image, meta)を返す."""
     meta = fetch_playlist_meta(
-        playlist_url, spotify_client_id, spotify_client_secret
+        playlist_url,
+        spotify_client_id,
+        spotify_client_secret,
+        spotify_redirect_uri=spotify_redirect_uri,
+        cache_path=cache_path,
     )
 
     if provider == "gemini":

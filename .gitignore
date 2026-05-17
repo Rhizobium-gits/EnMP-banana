@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 .env
 .env.*
+.spotify_cache
+.cache
 *.png
 *.jpg
 *.jpeg

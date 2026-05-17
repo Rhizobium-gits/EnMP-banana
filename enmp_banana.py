@@ -63,13 +63,32 @@ def fetch_playlist_meta(
         )
     )
     playlist_id = extract_playlist_id(playlist_url)
-    playlist = sp.playlist(playlist_id)
 
-    items = playlist["tracks"]["items"]
-    results = playlist["tracks"]
-    while results.get("next"):
-        results = sp.next(results)
-        items.extend(results["items"])
+    # 🐱 基本情報だけ取る(tracksは別エンドポイントで)
+    basic = sp.playlist(playlist_id, fields="name,owner(display_name)")
+    if not isinstance(basic, dict) or "name" not in basic:
+        raise RuntimeError(
+            "Spotify did not return playlist metadata. "
+            "Check that the playlist URL is correct and the playlist is PUBLIC, "
+            "and that Client ID/Secret are valid. "
+            f"Got: {basic!r}"
+        )
+    playlist_name = basic["name"]
+    owner_name = (basic.get("owner") or {}).get("display_name") or "Unknown"
+
+    # 🐱 トラック一覧はplaylist_itemsで明示的にページング
+    items: List[dict] = []
+    page = sp.playlist_items(
+        playlist_id,
+        limit=100,
+        additional_types=("track",),
+    )
+    while page is not None:
+        items.extend(page.get("items") or [])
+        if page.get("next"):
+            page = sp.next(page)
+        else:
+            break
 
     artist_ids: List[str] = []
     cover_urls: List[str] = []
@@ -105,8 +124,8 @@ def fetch_playlist_meta(
 
     return PlaylistMeta(
         playlist_id=playlist_id,
-        name=playlist["name"],
-        owner=(playlist.get("owner") or {}).get("display_name") or "Unknown",
+        name=playlist_name,
+        owner=owner_name,
         top_genres=top_genres,
         cover_urls=uniq_covers,
         cover_images=cover_images,

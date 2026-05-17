@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple
 
 import requests
 import spotipy
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from spotipy.oauth2 import SpotifyOAuth
 
 CANVAS_W, CANVAS_H = 1080, 1920
@@ -91,6 +91,7 @@ def fetch_playlist_meta(
     page = sp.playlist_items(
         playlist_id,
         limit=100,
+        market="from_token",
         additional_types=("track",),
     )
     while page is not None:
@@ -102,14 +103,22 @@ def fetch_playlist_meta(
 
     artist_ids: List[str] = []
     cover_urls: List[str] = []
+    n_null_track = n_local = n_no_image = 0
     for it in items:
-        track = it.get("track") or {}
-        for a in track.get("artists", []):
+        if it.get("is_local"):
+            n_local += 1
+        track = it.get("track")
+        if not track:
+            n_null_track += 1
+            continue
+        for a in track.get("artists", []) or []:
             if a.get("id"):
                 artist_ids.append(a["id"])
         images = (track.get("album") or {}).get("images") or []
         if images:
             cover_urls.append(images[0]["url"])
+        else:
+            n_no_image += 1
 
     # 🐱 ジャンルはアーティスト経由で集めて多数決
     genres: List[str] = []
@@ -134,7 +143,8 @@ def fetch_playlist_meta(
 
     print(
         f"[EnMP] '{playlist_name}' by {owner_name} | "
-        f"tracks: {len(items)} | covers downloaded: {len(cover_images)} | "
+        f"tracks: {len(items)} (null:{n_null_track} local:{n_local} no_image:{n_no_image}) | "
+        f"cover URLs: {len(uniq_covers)} | covers downloaded: {len(cover_images)} | "
         f"top genres: {top_genres}"
     )
 
@@ -162,6 +172,46 @@ def _background_prompt(meta: PlaylistMeta) -> str:
         "STRICT: Do NOT render any text, letters, numbers, or logos. "
         "Background art only — text and logos are added later by the renderer."
     )
+
+
+# ---------- Local collage provider (no API, always works) ----------
+def generate_background_collage(meta: PlaylistMeta) -> Image.Image:
+    """ジャケ写を 1080x1920 にタイル → ぼかし → 軽く暗転して背景にする.
+
+    画像生成APIを叩かないので無料・確実。ジャケ写が1枚も無い場合は
+    プレイリスト名/ジャンルから決定論的なグラデを作る.
+    """
+    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), (24, 24, 24))
+    covers = meta.cover_images
+
+    if not covers:
+        # 🐱 ジャケ写ゼロ時はプレイリスト名のハッシュで色を決める
+        seed = sum(ord(c) for c in (meta.name + " ".join(meta.top_genres))) or 1
+        c1 = ((seed * 73) % 200 + 30, (seed * 137) % 200 + 30, (seed * 211) % 200 + 30)
+        c2 = ((seed * 211) % 200 + 30, (seed * 73) % 200 + 30, (seed * 137) % 200 + 30)
+        d = ImageDraw.Draw(canvas)
+        for y in range(CANVAS_H):
+            t = y / CANVAS_H
+            r = int(c1[0] + (c2[0] - c1[0]) * t)
+            g = int(c1[1] + (c2[1] - c1[1]) * t)
+            b = int(c1[2] + (c2[2] - c1[2]) * t)
+            d.line([(0, y), (CANVAS_W, y)], fill=(r, g, b))
+        return canvas
+
+    # 🐱 3列タイルで埋める。足りない分はループ
+    cols = 3
+    tile = CANVAS_W // cols
+    rows = (CANVAS_H + tile - 1) // tile
+    for r in range(rows):
+        for c in range(cols):
+            cov = covers[(r * cols + c) % len(covers)]
+            t_img = cov.resize((tile, tile), Image.LANCZOS)
+            canvas.paste(t_img, (c * tile, r * tile))
+
+    # 🐱 ぼかしてmoodboard感を出す + 軽く暗転
+    canvas = canvas.filter(ImageFilter.GaussianBlur(28))
+    canvas = Image.blend(canvas, Image.new("RGB", canvas.size, (0, 0, 0)), 0.28)
+    return canvas
 
 
 # ---------- Gemini provider ----------
@@ -387,7 +437,9 @@ def make_thumbnail(
         cache_path=cache_path,
     )
 
-    if provider == "gemini":
+    if provider == "collage":
+        bg = generate_background_collage(meta)
+    elif provider == "gemini":
         if not gemini_api_key:
             raise ValueError("gemini_api_key is required for provider='gemini'")
         bg = generate_background_gemini(meta, gemini_api_key, gemini_model)

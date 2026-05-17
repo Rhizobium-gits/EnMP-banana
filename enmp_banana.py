@@ -34,6 +34,8 @@ class PlaylistMeta:
     name: str
     owner: str
     top_genres: List[str]
+    top_artists: List[str]
+    top_tracks: List[str]
     cover_urls: List[str]
     cover_images: List[Image.Image]
     track_count: int
@@ -102,6 +104,8 @@ def fetch_playlist_meta(
             break
 
     artist_ids: List[str] = []
+    artist_name_counter: Counter = Counter()
+    track_names: List[str] = []
     cover_urls: List[str] = []
     n_null_track = n_local = n_no_image = 0
     for it in items:
@@ -111,14 +115,21 @@ def fetch_playlist_meta(
         if not track:
             n_null_track += 1
             continue
+        if track.get("name"):
+            track_names.append(track["name"])
         for a in track.get("artists", []) or []:
             if a.get("id"):
                 artist_ids.append(a["id"])
+            if a.get("name"):
+                artist_name_counter[a["name"]] += 1
         images = (track.get("album") or {}).get("images") or []
         if images:
             cover_urls.append(images[0]["url"])
         else:
             n_no_image += 1
+
+    top_artists = [n for n, _ in artist_name_counter.most_common(5)]
+    top_tracks = track_names[:5]
 
     # 🐱 ジャンルはアーティスト経由で集めて多数決
     genres: List[str] = []
@@ -153,6 +164,8 @@ def fetch_playlist_meta(
         name=playlist_name,
         owner=owner_name,
         top_genres=top_genres,
+        top_artists=top_artists,
+        top_tracks=top_tracks,
         cover_urls=uniq_covers,
         cover_images=cover_images,
         track_count=len(items),
@@ -403,45 +416,109 @@ def generate_background_collage(meta: PlaylistMeta) -> Image.Image:
 
 
 # ---------- Pollinations provider (free AI, no auth) ----------
+# 🐱 ジャンル→(具体イラスト指示, Pollinationsモデル)。部分一致でヒット
+STYLE_TEMPLATES: List[Tuple[str, str, str]] = [
+    ("metal",      "dark fantasy concert poster art, dramatic chiaroscuro lighting, gothic textures, brutalist composition, smoke and embers", "flux"),
+    ("punk",       "distressed punk zine collage, torn paper, photocopy texture, DIY aesthetic, safety pins and stickers", "flux"),
+    ("rock",       "vintage rock concert poster illustration, electric guitar imagery, warm sepia tones, film grain, halftone print", "flux"),
+    ("jazz",       "smoky jazz club illustration, art deco style, sepia and amber tones, vinyl records, saxophone silhouettes, 1950s nightlife", "flux"),
+    ("blues",      "moody bluesman silhouette, dimly lit bar, deep blue and warm amber, slide guitar imagery, painterly", "flux"),
+    ("hip hop",    "urban graffiti street art mural, gritty city night, spray paint textures, sneakers and boomboxes, bold colors", "flux"),
+    ("rap",        "urban graffiti street art mural, gritty city night, spray paint textures, sneakers and boomboxes, bold colors", "flux"),
+    ("trap",       "dark luxurious street aesthetic, gold chains, smoke, urban night, neon signs reflection, cinematic", "flux"),
+    ("r&b",        "soft sensual illustration, velvet curtains, candlelight, romantic mood, deep purples and burgundy, sultry", "flux"),
+    ("soul",       "vintage soul record cover, retro 70s aesthetic, warm earth tones, microphone and stage lights, painterly", "flux"),
+    ("classical",  "renaissance baroque painting style, ornate gold details, marble, soft chiaroscuro, oil painting", "flux"),
+    ("ambient",    "ethereal cosmic landscape, nebula, dreamlike floating shapes, soft pastel gradients, abstract space art", "flux"),
+    ("chill",      "calm pastel anime cityscape at sunset, lofi study aesthetic, soft lighting, cozy atmosphere", "flux-anime"),
+    ("lo-fi",      "anime girl with headphones studying by window, rainy city night, cozy bedroom plants, lofi hiphop aesthetic", "flux-anime"),
+    ("lofi",       "anime girl with headphones studying by window, rainy city night, cozy bedroom plants, lofi hiphop aesthetic", "flux-anime"),
+    ("anime",      "anime illustration style, vibrant cel shading, expressive character art, soft pastel highlights", "flux-anime"),
+    ("j-pop",      "anime style pop poster, sakura petals, bright pop colors, kawaii character, idol aesthetic", "flux-anime"),
+    ("k-pop",      "modern pop idol poster, glossy futuristic fashion, bold color blocking, magazine editorial style", "flux"),
+    ("city pop",   "1980s Japanese city pop aesthetic, neon Tokyo skyline at night, vaporwave palette, retro convertible car", "flux"),
+    ("vaporwave",  "vaporwave aesthetic, Greek statue head, pink and cyan, retro 80s computer graphics, palm trees", "flux"),
+    ("synthwave",  "synthwave neon grid, retro 1980s sunset, palm trees silhouettes, magenta and cyan, chrome", "flux"),
+    ("techno",     "industrial warehouse rave, strobe lights, geometric patterns, dark concrete, smoke", "flux"),
+    ("house",      "Ibiza beach club at sunset, palm trees, warm gradient sky, dance floor reflections", "flux"),
+    ("edm",        "festival neon laser show, energetic crowd silhouettes, vivid stage lights, confetti, high energy", "flux"),
+    ("electronic", "cyberpunk neon cityscape, futuristic, glowing wires, holographic projections, rain reflections", "flux"),
+    ("dnb",        "abstract motion blur energy, geometric fractal patterns, neon green and purple, fast frenetic", "flux"),
+    ("drum and bass", "abstract motion blur energy, geometric fractal patterns, neon green and purple, fast frenetic", "flux"),
+    ("dubstep",    "glitch art aesthetic, fractured neon shapes, digital distortion, bass wave visualizations", "flux"),
+    ("country",    "American western prairie, golden hour, vintage pickup truck, denim and wheat tones, big sky", "flux"),
+    ("folk",       "watercolor forest illustration, hand-drawn, earthy tones, acoustic guitar by campfire, cozy", "flux"),
+    ("indie",      "indie album cover illustration, dreamy washed-out colors, polaroid feel, melancholic mood", "flux"),
+    ("latin",      "tropical sunset, palm trees, vibrant warm colors, salsa dancers silhouettes, festive", "flux"),
+    ("reggae",     "rastafarian colors green yellow red, Caribbean beach, palm trees, mellow chill vibe", "flux"),
+    ("disco",      "disco ball reflections, glittery 1970s dance floor, sparkles, bell bottoms silhouettes", "flux"),
+    ("funk",       "70s funk poster, afro silhouettes, bell bottoms, psychedelic spiral patterns, warm orange and brown", "flux"),
+    ("dance",      "energetic dance club, motion blur lights, vivid colors, silhouettes mid-movement", "flux"),
+    ("pop",        "modern pop art illustration, bright bold colors, comic-book aesthetic, halftone dots", "flux"),
+]
+
+
+def _style_from_genres(genres: List[str]) -> Tuple[str, str]:
+    """top_genres から具体的なスタイル指示とPollinationsモデルを決定."""
+    for g in genres:
+        gl = g.lower()
+        for key, style, model in STYLE_TEMPLATES:
+            if key in gl:
+                return style, model
+    return (
+        "eclectic mixed-media moodboard, varied textures, surreal collage, painterly, "
+        "rich color palette",
+        "flux",
+    )
+
+
 def generate_background_pollinations(
     meta: PlaylistMeta,
-    model: str = "flux",
     timeout: int = 180,
 ) -> Image.Image:
-    """無料のpollinations.ai (裏はFLUX/SDXL等) で1080x1920背景を生成.
+    """無料のpollinations.ai (FLUX) でジャンル別スタイルの1080x1920背景を生成.
 
-    認証不要・課金不要。ジャケ写そのものは渡せないが、ジャケ写から抽出した
-    色とジャンル/タイトルをプロンプトにしてAIにmoodboardイラストを描かせる.
+    プロンプトを「ジャンル別の具体的なイラスト指示 + 実際のアーティスト名 +
+    ジャケ写から抽出した色」で組み立てるので、プレイリストごとに絵柄が変わる.
     """
     import urllib.parse
+
+    style_desc, model = _style_from_genres(meta.top_genres)
 
     color_hex: List[str] = []
     if meta.cover_images:
         for r, g, b in _extract_dominant_colors(meta.cover_images, n=4):
             color_hex.append(f"#{r:02x}{g:02x}{b:02x}")
 
-    genre_str = ", ".join(meta.top_genres[:5]) if meta.top_genres else "mixed mood"
-    color_str = ", ".join(color_hex) if color_hex else "vibrant"
-
-    prompt = (
-        f"Vertical 9:16 abstract artistic illustration for music playlist "
-        f"'{meta.name}', mood and genres: {genre_str}, "
-        f"color palette: {color_str}, "
-        f"style: stylish moodboard art, mixed media collage, surreal dreamy "
-        f"atmosphere, soft brush strokes, ethereal lighting, painterly. "
-        f"Composition: clean negative space in the upper third for a title overlay, "
-        f"and the bottom right corner relatively clean for a logo. "
-        f"Strictly do not render any text, letters, numbers, or logos."
+    parts: List[str] = [
+        f"Album cover style illustration inspired by the music playlist '{meta.name}'.",
+        f"Visual direction: {style_desc}.",
+    ]
+    if meta.top_artists:
+        parts.append("Inspired by artists like " + ", ".join(meta.top_artists[:3]) + ".")
+    if meta.top_genres:
+        parts.append("Music genres: " + ", ".join(meta.top_genres[:4]) + ".")
+    if color_hex:
+        parts.append("Color palette to follow: " + ", ".join(color_hex) + ".")
+    parts.append(
+        "Vertical portrait 9:16 composition. Leave clean negative space in the "
+        "upper third for a title overlay and bottom right for a logo overlay. "
+        "Strictly no text, no letters, no numbers, no logos, no watermarks."
     )
+    prompt = " ".join(parts)
+
+    # 🐱 同じプレイリストでも変化を出すためにseedを名前から決定論的に
+    seed = abs(hash(meta.playlist_id + meta.name)) % 999999
 
     url = (
         "https://image.pollinations.ai/prompt/"
         + urllib.parse.quote(prompt, safe="")
         + f"?width=1080&height=1920&model={urllib.parse.quote(model)}"
-        + "&nologo=true&enhance=true&private=true"
+        + f"&seed={seed}&nologo=true&enhance=true&private=true"
     )
 
-    print(f"[EnMP] Pollinations generating (this can take 30-120s)...")
+    print(f"[EnMP] Pollinations style='{style_desc[:60]}...' model={model} seed={seed}")
+    print(f"[EnMP] Generating (30-120s)...")
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()
     return Image.open(io.BytesIO(r.content)).convert("RGB")

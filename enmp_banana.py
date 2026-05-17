@@ -132,6 +132,12 @@ def fetch_playlist_meta(
         except Exception:
             continue
 
+    print(
+        f"[EnMP] '{playlist_name}' by {owner_name} | "
+        f"tracks: {len(items)} | covers downloaded: {len(cover_images)} | "
+        f"top genres: {top_genres}"
+    )
+
     return PlaylistMeta(
         playlist_id=playlist_id,
         name=playlist_name,

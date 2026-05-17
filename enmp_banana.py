@@ -497,65 +497,146 @@ def _stable_seed(s: str) -> int:
     return h % 999_983  # 🐱 6桁前後の素数寄りで切る
 
 
+def _analyze_covers_visual(meta: PlaylistMeta) -> Optional[dict]:
+    """PILでジャケ写から視覚特徴をローカル抽出する(API不要)。
+
+    抽出項目:
+      - 平均輝度 (dark / mid / bright)
+      - 平均彩度 (muted / natural / vibrant)
+      - 色温度 (cool / neutral / warm)
+      - エッジ密度 (minimal / detailed)
+      - 主要色 hex リスト
+    """
+    if not meta.cover_images:
+        return None
+
+    total_b = total_s = total_warm = 0.0
+    edge_density = 0.0
+    n_pixels = 0
+    for img in meta.cover_images:
+        small = img.convert("RGB").resize((80, 80))
+        pixels = list(small.getdata())
+        for r, g, b in pixels:
+            total_b += (r + g + b) / 3.0
+            total_s += max(r, g, b) - min(r, g, b)
+            total_warm += r - b
+        n_pixels += len(pixels)
+        edges = small.convert("L").filter(ImageFilter.FIND_EDGES)
+        edge_density += sum(edges.getdata()) / (80 * 80)
+
+    n_imgs = len(meta.cover_images)
+    avg_b = total_b / n_pixels
+    avg_s = total_s / n_pixels
+    avg_warm = total_warm / n_pixels
+    avg_edge = edge_density / n_imgs
+
+    desc: List[str] = []
+    if avg_b > 175:
+        desc.append("bright luminous airy lighting")
+    elif avg_b < 70:
+        desc.append("dark moody dramatic shadows")
+    else:
+        desc.append("balanced midtones cinematic lighting")
+    if avg_s > 85:
+        desc.append("highly saturated vibrant colors")
+    elif avg_s < 35:
+        desc.append("muted desaturated earthy tones")
+    else:
+        desc.append("natural color saturation")
+    if avg_warm > 22:
+        desc.append("warm color temperature reddish golden")
+    elif avg_warm < -22:
+        desc.append("cool color temperature blueish atmosphere")
+    if avg_edge > 35:
+        desc.append("busy detailed intricate textures")
+    elif avg_edge < 12:
+        desc.append("minimal clean composition with negative space")
+
+    colors = _extract_dominant_colors(meta.cover_images, n=5)
+    color_hex = [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in colors]
+
+    return {
+        "mood_descriptors": ", ".join(desc),
+        "color_hex": color_hex,
+        "raw": {
+            "brightness": round(avg_b, 1),
+            "saturation": round(avg_s, 1),
+            "warmth": round(avg_warm, 1),
+            "edge_density": round(avg_edge, 1),
+        },
+    }
+
+
 def generate_background_pollinations(
     meta: PlaylistMeta,
     timeout: int = 180,
 ) -> Image.Image:
-    """無料のpollinations.ai (FLUX) でプレイリスト毎に絵柄が変わる縦長背景を生成.
+    """PILでジャケ写の視覚特徴(明るさ/彩度/色温度/コントラスト/主要色)を抽出し、
+    それらを反映したプロンプトをPollinations FLUXに投げて1080x1920背景を生成.
 
-    プレイリスト固有の差を最大化するため、プロンプト先頭にplaylist name/track名を
-    据え、art mediumはseedでローテーション。
+    ジャンルの既定シーンに頼らず、実際のジャケ写の特徴から絵柄を決めるので
+    プレイリスト毎に絵がちゃんと変わる。
     """
     import urllib.parse
 
-    style_desc, model = _style_from_genres(meta.top_genres)
     seed = _stable_seed(meta.playlist_id + "|" + meta.name)
     medium = ART_MEDIUMS[seed % len(ART_MEDIUMS)]
+    analysis = _analyze_covers_visual(meta)
 
-    color_hex: List[str] = []
-    if meta.cover_images:
-        for r, g, b in _extract_dominant_colors(meta.cover_images, n=4):
-            color_hex.append(f"#{r:02x}{g:02x}{b:02x}")
+    parts: List[str] = [f"A vertical 9:16 portrait artwork in {medium} style."]
 
-    parts: List[str] = [
-        # 🐱 名前と画材を先頭に置いてAIの注意を集める
-        f"A vertical 9:16 {medium} artwork that captures the vibe of a music "
-        f"playlist titled \"{meta.name}\".",
-        f"Scene direction: {style_desc}.",
-    ]
-    if meta.top_tracks:
+    if analysis:
         parts.append(
-            "Songs in this playlist include: "
-            + "; ".join(f"\"{t}\"" for t in meta.top_tracks[:4])
+            "Visual feel extracted from the playlist's album covers: "
+            + analysis["mood_descriptors"]
             + "."
         )
-    if meta.top_artists:
         parts.append(
-            "Featured artists: " + ", ".join(meta.top_artists[:4]) + "."
+            "Strictly follow this exact color palette: "
+            + ", ".join(analysis["color_hex"])
+            + "."
         )
+    else:
+        parts.append("Visual feel: dreamy moodboard.")
+
     if meta.top_genres:
-        parts.append("Music genres: " + ", ".join(meta.top_genres[:3]) + ".")
-    if color_hex:
-        parts.append("Color palette: " + ", ".join(color_hex) + ".")
+        parts.append("Music mood reference: " + ", ".join(meta.top_genres[:3]) + ".")
+    if meta.top_tracks:
+        parts.append(
+            "Track name hints: "
+            + "; ".join(f"\"{t}\"" for t in meta.top_tracks[:3])
+            + "."
+        )
+
     parts.append(
-        "Composition rules: clean negative space in the upper third for a title "
-        "overlay, bottom right corner relatively empty for a logo. "
+        "Composition: leave clean negative space in the upper third for title "
+        "text and bottom right for a small logo. "
         "Strictly no text, no letters, no numbers, no logos, no watermarks."
     )
-    prompt = " ".join(parts)
+    image_prompt = " ".join(parts)
+
+    if analysis:
+        print(f"[EnMP] cover analysis: {analysis['raw']}")
+        print(f"[EnMP] mood: {analysis['mood_descriptors']}")
+        print(f"[EnMP] palette: {', '.join(analysis['color_hex'])}")
+    print(f"[EnMP] medium='{medium}' seed={seed}")
+    print(f"[EnMP] prompt: {image_prompt}")
 
     url = (
         "https://image.pollinations.ai/prompt/"
-        + urllib.parse.quote(prompt, safe="")
-        + f"?width=1080&height=1920&model={urllib.parse.quote(model)}"
-        + f"&seed={seed}&nologo=true&enhance=true"
+        + urllib.parse.quote(image_prompt, safe="")
+        + f"?width=1080&height=1920&model=flux&seed={seed}"
+        + "&nologo=true&enhance=true"
     )
-
-    print(f"[EnMP] medium='{medium}' | style='{style_desc[:50]}...' | model={model} | seed={seed}")
-    print(f"[EnMP] prompt: {prompt}")
-    print(f"[EnMP] Generating (30-120s)...")
+    print(f"[EnMP] generating with FLUX (30-120s)...")
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()
+    ct = r.headers.get("content-type", "")
+    if not ct.startswith("image/"):
+        raise RuntimeError(
+            f"Pollinations did not return an image (content-type={ct}): "
+            f"{r.text[:300]}"
+        )
     return Image.open(io.BytesIO(r.content)).convert("RGB")
 
 
@@ -785,7 +866,11 @@ def make_thumbnail(
     if provider == "collage":
         bg = generate_background_collage(meta)
     elif provider == "pollinations":
-        bg = generate_background_pollinations(meta)
+        try:
+            bg = generate_background_pollinations(meta)
+        except Exception as e:
+            print(f"[EnMP] Pollinations failed ({e}); falling back to local collage")
+            bg = generate_background_collage(meta)
     elif provider == "gemini":
         if not gemini_api_key:
             raise ValueError("gemini_api_key is required for provider='gemini'")

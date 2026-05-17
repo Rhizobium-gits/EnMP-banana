@@ -1,5 +1,7 @@
 # EnMP banana
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Rhizobium-gits/EnMP-banana/blob/main/EnMP_banana.ipynb)
+
 **EnMP banana** = **En**hance **M**y **P**laylist **banana**.
 
 Spotify公開プレイリストのURLから、その中身（アルバム画像・ジャンル・タイトル・作成者）を集めて、

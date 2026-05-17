@@ -216,49 +216,134 @@ GENRE_PALETTES: List[Tuple[str, Tuple[int, int, int], Tuple[int, int, int]]] = [
 
 
 def _palette_from_genres(genres: List[str]) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
-    """top_genresからジャンル名の部分一致で(primary, secondary)を返す."""
+    """top_genresからジャンル名の部分一致で(primary, secondary)を返す(ジャケ写ゼロ時のフォールバック用)."""
     for g in genres:
         gl = g.lower()
         for key, primary, secondary in GENRE_PALETTES:
             if key in gl:
                 return primary, secondary
-    # 🐱 ヒットしなかったらシード固定のカラフルなデフォルト
     return (140, 100, 220), (60, 200, 200)
 
 
+def _extract_dominant_colors(
+    covers: List[Image.Image], n: int = 4
+) -> List[Tuple[int, int, int]]:
+    """全ジャケ写から鮮やかな主要色を集約してN色返す.
+
+    各画像をquantizeで色量子化→ニアグレー/ニア黒白を除外→
+    彩度×出現量で重み付けして降順ソート、似た色はマージ.
+    """
+    weighted: List[Tuple[Tuple[int, int, int], int]] = []
+    for cov in covers:
+        small = cov.convert("RGB").resize((96, 96), Image.LANCZOS)
+        q = small.quantize(colors=8, method=Image.Quantize.MEDIANCUT)
+        pal = q.getpalette() or []
+        counts = q.getcolors() or []
+        for cnt, idx in counts:
+            r, g, b = pal[idx * 3], pal[idx * 3 + 1], pal[idx * 3 + 2]
+            mx, mn = max(r, g, b), min(r, g, b)
+            sat = mx - mn
+            bright = (r + g + b) // 3
+            # 🐱 暗すぎ/明るすぎ/グレーすぎは捨てる
+            if bright < 35 or bright > 235 or sat < 35:
+                continue
+            weighted.append(((r, g, b), cnt * (sat + 30)))
+
+    if not weighted:
+        return []
+
+    # 🐱 似た色をマージ(色差32以内なら同じグループ)
+    weighted.sort(key=lambda x: -x[1])
+    merged: List[Tuple[Tuple[int, int, int], int]] = []
+    for color, w in weighted:
+        placed = False
+        for i, (mc, mw) in enumerate(merged):
+            if (
+                abs(color[0] - mc[0]) < 32
+                and abs(color[1] - mc[1]) < 32
+                and abs(color[2] - mc[2]) < 32
+            ):
+                merged[i] = (mc, mw + w)
+                placed = True
+                break
+        if not placed:
+            merged.append((color, w))
+
+    merged.sort(key=lambda x: -x[1])
+    return [c for c, _ in merged[:n]]
+
+
+def _smart_palette(
+    meta: PlaylistMeta,
+) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+    """まずジャケ写から色抽出を試み、取れなければジャンル辞書にフォールバック."""
+    if meta.cover_images:
+        colors = _extract_dominant_colors(meta.cover_images, n=3)
+        if len(colors) >= 2:
+            return colors[0], colors[1]
+        if len(colors) == 1:
+            _, fallback_secondary = _palette_from_genres(meta.top_genres)
+            return colors[0], fallback_secondary
+    return _palette_from_genres(meta.top_genres)
+
+
+def _blurred_cover_blob(
+    cov: Image.Image, size: int, blur: int = 90
+) -> Image.Image:
+    """ジャケ写を超ぼかし+ソフト楕円マスクして装飾ブロブにする."""
+    img = cov.convert("RGB").resize((size, size), Image.LANCZOS)
+    img = img.filter(ImageFilter.GaussianBlur(blur))
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse([(0, 0), (size, size)], fill=255)
+    mask = mask.filter(ImageFilter.GaussianBlur(40))
+    out = img.convert("RGBA")
+    out.putalpha(mask)
+    return out
+
+
 def generate_background_collage(meta: PlaylistMeta) -> Image.Image:
-    """ジャンル由来パレットとジャケ写の組み合わせで1080x1920背景を作る.
+    """ジャケ写の色とコンテンツを混ぜ合わせた1080x1920背景を作る.
 
     層構成:
-      1. 一番目のジャケ写を強くぼかした全画面ベース (無ければ単色)
-      2. ジャンル主色のカラーウォッシュ
-      3. ジャンル副色/主色の大きなぼかしブロブ (装飾)
-      4. 中央寄りに最大4枚のジャケ写を角丸で配置（visible moodboard）
+      1. ジャケ写[0]を全画面ぼかしてベース (無ければ単色)
+      2. ジャケ写から抽出した主色のウォッシュ
+      3. ジャケ写[1..3]を超ぼかし+楕円マスクした「ブロブ」を四隅に配置(装飾)
+      4. 中央に最大4枚のジャケ写を角丸+影付きで visible に配置(moodboard本体)
     """
-    primary, secondary = _palette_from_genres(meta.top_genres)
+    primary, secondary = _smart_palette(meta)
     covers = meta.cover_images
 
-    # 1. ベース層
+    # 1. ベース層: ジャケ写[0]を強くぼかしてフルキャンバスに
     if covers:
-        canvas = covers[0].resize((CANVAS_W, CANVAS_H), Image.LANCZOS)
+        canvas = covers[0].convert("RGB").resize((CANVAS_W, CANVAS_H), Image.LANCZOS)
         canvas = canvas.filter(ImageFilter.GaussianBlur(80))
     else:
         canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), primary)
     canvas = canvas.convert("RGBA")
 
-    # 2. ジャンル主色のウォッシュ
-    wash = Image.new("RGBA", canvas.size, (*primary, 140))
+    # 2. ジャケ写抽出色のウォッシュ(彩度を保ちつつ画面を整える)
+    wash = Image.new("RGBA", canvas.size, (*primary, 110))
     canvas = Image.alpha_composite(canvas, wash)
 
-    # 3. 装飾ブロブ(ジャンル副色と主色)
-    decor = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    dd = ImageDraw.Draw(decor)
-    dd.ellipse([(-250, -400), (650, 500)], fill=(*secondary, 150))
-    dd.ellipse([(650, 1200), (1500, 2050)], fill=(*primary, 130))
-    dd.ellipse([(100, 1500), (700, 2100)], fill=(*secondary, 90))
-    dd.ellipse([(750, 350), (1100, 700)], fill=(*primary, 80))
-    decor = decor.filter(ImageFilter.GaussianBlur(90))
-    canvas = Image.alpha_composite(canvas, decor)
+    # 3. ジャケ写そのものを使った装飾ブロブ(色は本物の写真の色)
+    blob_specs = [
+        (1, 900, (-180, -280)),
+        (2, 900, (640, 1280)),
+        (3, 700, (-80, 1520)),
+        (0, 600, (780, 280)),
+    ]
+    for cov_idx, size, pos in blob_specs:
+        if cov_idx < len(covers):
+            blob = _blurred_cover_blob(covers[cov_idx], size, blur=100)
+            canvas.alpha_composite(blob, pos)
+
+    # 4. 単色ブロブを副色で1個だけ重ねて統一感を出す
+    accent = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    ImageDraw.Draw(accent).ellipse(
+        [(300, 1400), (1100, 2200)], fill=(*secondary, 90)
+    )
+    accent = accent.filter(ImageFilter.GaussianBlur(120))
+    canvas = Image.alpha_composite(canvas, accent)
 
     # 4. 中央のジャケ写moodboard(角丸)
     if covers:

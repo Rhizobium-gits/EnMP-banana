@@ -175,43 +175,146 @@ def _background_prompt(meta: PlaylistMeta) -> str:
 
 
 # ---------- Local collage provider (no API, always works) ----------
-def generate_background_collage(meta: PlaylistMeta) -> Image.Image:
-    """ジャケ写を 1080x1920 にタイル → ぼかし → 軽く暗転して背景にする.
+# 🐱 ジャンル→(主色, 副色)のパレット。部分一致で拾うので "japanese pop" → "pop"などもヒット
+GENRE_PALETTES: List[Tuple[str, Tuple[int, int, int], Tuple[int, int, int]]] = [
+    ("metal",     (40, 40, 40),    (180, 30, 40)),
+    ("punk",      (220, 40, 90),   (30, 30, 30)),
+    ("rock",      (180, 50, 60),   (40, 40, 60)),
+    ("trap",      (180, 100, 220), (40, 40, 60)),
+    ("hip hop",   (220, 170, 60),  (90, 30, 110)),
+    ("rap",       (220, 170, 60),  (40, 40, 40)),
+    ("r&b",       (180, 80, 140),  (60, 30, 90)),
+    ("soul",      (200, 130, 60),  (90, 40, 60)),
+    ("jazz",      (180, 140, 80),  (40, 60, 90)),
+    ("blues",     (40, 80, 140),   (180, 130, 60)),
+    ("k-pop",     (255, 120, 180), (180, 100, 255)),
+    ("j-pop",     (255, 130, 180), (130, 200, 255)),
+    ("anime",     (255, 150, 200), (130, 180, 255)),
+    ("city pop",  (255, 150, 120), (90, 180, 220)),
+    ("pop",       (255, 100, 180), (90, 180, 255)),
+    ("techno",    (30, 200, 220),  (180, 60, 255)),
+    ("house",     (255, 200, 60),  (60, 100, 255)),
+    ("edm",       (255, 60, 180),  (60, 220, 255)),
+    ("electro",   (60, 220, 200),  (255, 70, 200)),
+    ("dance",     (255, 70, 200),  (60, 220, 200)),
+    ("drum and bass", (80, 220, 180), (180, 60, 220)),
+    ("dnb",       (80, 220, 180),  (180, 60, 220)),
+    ("dubstep",   (140, 50, 220),  (50, 200, 180)),
+    ("indie",     (220, 180, 130), (90, 130, 100)),
+    ("folk",      (180, 150, 100), (90, 110, 70)),
+    ("country",   (200, 140, 80),  (90, 110, 130)),
+    ("classical", (230, 215, 170), (40, 60, 100)),
+    ("ambient",   (150, 180, 220), (200, 180, 230)),
+    ("chill",     (180, 200, 230), (220, 200, 180)),
+    ("lo-fi",     (220, 180, 200), (140, 130, 180)),
+    ("lofi",      (220, 180, 200), (140, 130, 180)),
+    ("latin",     (255, 140, 90),  (220, 60, 100)),
+    ("reggae",    (220, 200, 60),  (60, 180, 100)),
+    ("funk",      (255, 180, 60),  (220, 60, 180)),
+    ("disco",     (255, 90, 200),  (255, 200, 60)),
+]
 
-    画像生成APIを叩かないので無料・確実。ジャケ写が1枚も無い場合は
-    プレイリスト名/ジャンルから決定論的なグラデを作る.
+
+def _palette_from_genres(genres: List[str]) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+    """top_genresからジャンル名の部分一致で(primary, secondary)を返す."""
+    for g in genres:
+        gl = g.lower()
+        for key, primary, secondary in GENRE_PALETTES:
+            if key in gl:
+                return primary, secondary
+    # 🐱 ヒットしなかったらシード固定のカラフルなデフォルト
+    return (140, 100, 220), (60, 200, 200)
+
+
+def generate_background_collage(meta: PlaylistMeta) -> Image.Image:
+    """ジャンル由来パレットとジャケ写の組み合わせで1080x1920背景を作る.
+
+    層構成:
+      1. 一番目のジャケ写を強くぼかした全画面ベース (無ければ単色)
+      2. ジャンル主色のカラーウォッシュ
+      3. ジャンル副色/主色の大きなぼかしブロブ (装飾)
+      4. 中央寄りに最大4枚のジャケ写を角丸で配置（visible moodboard）
     """
-    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), (24, 24, 24))
+    primary, secondary = _palette_from_genres(meta.top_genres)
     covers = meta.cover_images
 
-    if not covers:
-        # 🐱 ジャケ写ゼロ時はプレイリスト名のハッシュで色を決める
-        seed = sum(ord(c) for c in (meta.name + " ".join(meta.top_genres))) or 1
-        c1 = ((seed * 73) % 200 + 30, (seed * 137) % 200 + 30, (seed * 211) % 200 + 30)
-        c2 = ((seed * 211) % 200 + 30, (seed * 73) % 200 + 30, (seed * 137) % 200 + 30)
-        d = ImageDraw.Draw(canvas)
-        for y in range(CANVAS_H):
-            t = y / CANVAS_H
-            r = int(c1[0] + (c2[0] - c1[0]) * t)
-            g = int(c1[1] + (c2[1] - c1[1]) * t)
-            b = int(c1[2] + (c2[2] - c1[2]) * t)
-            d.line([(0, y), (CANVAS_W, y)], fill=(r, g, b))
-        return canvas
+    # 1. ベース層
+    if covers:
+        canvas = covers[0].resize((CANVAS_W, CANVAS_H), Image.LANCZOS)
+        canvas = canvas.filter(ImageFilter.GaussianBlur(80))
+    else:
+        canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), primary)
+    canvas = canvas.convert("RGBA")
 
-    # 🐱 3列タイルで埋める。足りない分はループ
-    cols = 3
-    tile = CANVAS_W // cols
-    rows = (CANVAS_H + tile - 1) // tile
-    for r in range(rows):
-        for c in range(cols):
-            cov = covers[(r * cols + c) % len(covers)]
-            t_img = cov.resize((tile, tile), Image.LANCZOS)
-            canvas.paste(t_img, (c * tile, r * tile))
+    # 2. ジャンル主色のウォッシュ
+    wash = Image.new("RGBA", canvas.size, (*primary, 140))
+    canvas = Image.alpha_composite(canvas, wash)
 
-    # 🐱 ぼかしてmoodboard感を出す + 軽く暗転
-    canvas = canvas.filter(ImageFilter.GaussianBlur(28))
-    canvas = Image.blend(canvas, Image.new("RGB", canvas.size, (0, 0, 0)), 0.28)
-    return canvas
+    # 3. 装飾ブロブ(ジャンル副色と主色)
+    decor = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    dd = ImageDraw.Draw(decor)
+    dd.ellipse([(-250, -400), (650, 500)], fill=(*secondary, 150))
+    dd.ellipse([(650, 1200), (1500, 2050)], fill=(*primary, 130))
+    dd.ellipse([(100, 1500), (700, 2100)], fill=(*secondary, 90))
+    dd.ellipse([(750, 350), (1100, 700)], fill=(*primary, 80))
+    decor = decor.filter(ImageFilter.GaussianBlur(90))
+    canvas = Image.alpha_composite(canvas, decor)
+
+    # 4. 中央のジャケ写moodboard(角丸)
+    if covers:
+        n = min(len(covers), 4)
+        if n >= 4:
+            ts = 340
+            gap = 20
+            grid_w = ts * 2 + gap
+            grid_h = ts * 2 + gap
+            start_x = (CANVAS_W - grid_w) // 2
+            start_y = 880
+            positions = [
+                (start_x, start_y),
+                (start_x + ts + gap, start_y),
+                (start_x, start_y + ts + gap),
+                (start_x + ts + gap, start_y + ts + gap),
+            ]
+        elif n == 3:
+            ts = 300
+            gap = 18
+            start_x = (CANVAS_W - ts * 3 - gap * 2) // 2
+            start_y = 1000
+            positions = [(start_x + i * (ts + gap), start_y) for i in range(3)]
+        elif n == 2:
+            ts = 420
+            gap = 24
+            start_x = (CANVAS_W - ts * 2 - gap) // 2
+            start_y = 950
+            positions = [(start_x, start_y), (start_x + ts + gap, start_y)]
+        else:
+            ts = 560
+            start_x = (CANVAS_W - ts) // 2
+            start_y = 880
+            positions = [(start_x, start_y)]
+
+        mask = Image.new("L", (ts, ts), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([(0, 0), (ts, ts)], radius=28, fill=255)
+
+        tile_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        for i in range(n):
+            cov = covers[i].resize((ts, ts), Image.LANCZOS).convert("RGBA")
+            cov.putalpha(mask)
+            # 🐱 影
+            shadow = Image.new("RGBA", (ts + 40, ts + 40), (0, 0, 0, 0))
+            sd_mask = Image.new("L", shadow.size, 0)
+            ImageDraw.Draw(sd_mask).rounded_rectangle(
+                [(20, 20), (20 + ts, 20 + ts)], radius=28, fill=140
+            )
+            sd_mask = sd_mask.filter(ImageFilter.GaussianBlur(16))
+            shadow.putalpha(sd_mask)
+            sx, sy = positions[i]
+            tile_layer.alpha_composite(shadow, (sx - 20 + 6, sy - 20 + 12))
+            tile_layer.alpha_composite(cov, (sx, sy))
+        canvas = Image.alpha_composite(canvas, tile_layer)
+
+    return canvas.convert("RGB")
 
 
 # ---------- Gemini provider ----------
@@ -453,4 +556,9 @@ def make_thumbnail(
     img = compose_thumbnail(bg, meta, cta_text=cta_text)
     if output_path:
         img.save(output_path)
+    print(
+        f"[EnMP] provider={provider} | output size: {img.size[0]}x{img.size[1]} "
+        f"(target 1080x1920, 9:16)"
+        + (f" | saved: {output_path}" if output_path else "")
+    )
     return img, meta

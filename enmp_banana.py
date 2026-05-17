@@ -472,18 +472,45 @@ def _style_from_genres(genres: List[str]) -> Tuple[str, str]:
     )
 
 
+ART_MEDIUMS: List[str] = [
+    "watercolor painting",
+    "oil painting",
+    "digital illustration",
+    "ink and watercolor wash",
+    "pastel chalk drawing",
+    "mixed media collage",
+    "gouache painting",
+    "acrylic painting",
+    "screenprint poster art",
+    "linocut print",
+    "pencil sketch with color accents",
+    "risograph print",
+]
+
+
+def _stable_seed(s: str) -> int:
+    """hash()はプロセス毎に変わるので、文字列から安定した32bit整数seedを作る."""
+    h = 1469598103934665603
+    for ch in s:
+        h ^= ord(ch)
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return h % 999_983  # 🐱 6桁前後の素数寄りで切る
+
+
 def generate_background_pollinations(
     meta: PlaylistMeta,
     timeout: int = 180,
 ) -> Image.Image:
-    """無料のpollinations.ai (FLUX) でジャンル別スタイルの1080x1920背景を生成.
+    """無料のpollinations.ai (FLUX) でプレイリスト毎に絵柄が変わる縦長背景を生成.
 
-    プロンプトを「ジャンル別の具体的なイラスト指示 + 実際のアーティスト名 +
-    ジャケ写から抽出した色」で組み立てるので、プレイリストごとに絵柄が変わる.
+    プレイリスト固有の差を最大化するため、プロンプト先頭にplaylist name/track名を
+    据え、art mediumはseedでローテーション。
     """
     import urllib.parse
 
     style_desc, model = _style_from_genres(meta.top_genres)
+    seed = _stable_seed(meta.playlist_id + "|" + meta.name)
+    medium = ART_MEDIUMS[seed % len(ART_MEDIUMS)]
 
     color_hex: List[str] = []
     if meta.cover_images:
@@ -491,33 +518,41 @@ def generate_background_pollinations(
             color_hex.append(f"#{r:02x}{g:02x}{b:02x}")
 
     parts: List[str] = [
-        f"Album cover style illustration inspired by the music playlist '{meta.name}'.",
-        f"Visual direction: {style_desc}.",
+        # 🐱 名前と画材を先頭に置いてAIの注意を集める
+        f"A vertical 9:16 {medium} artwork that captures the vibe of a music "
+        f"playlist titled \"{meta.name}\".",
+        f"Scene direction: {style_desc}.",
     ]
+    if meta.top_tracks:
+        parts.append(
+            "Songs in this playlist include: "
+            + "; ".join(f"\"{t}\"" for t in meta.top_tracks[:4])
+            + "."
+        )
     if meta.top_artists:
-        parts.append("Inspired by artists like " + ", ".join(meta.top_artists[:3]) + ".")
+        parts.append(
+            "Featured artists: " + ", ".join(meta.top_artists[:4]) + "."
+        )
     if meta.top_genres:
-        parts.append("Music genres: " + ", ".join(meta.top_genres[:4]) + ".")
+        parts.append("Music genres: " + ", ".join(meta.top_genres[:3]) + ".")
     if color_hex:
-        parts.append("Color palette to follow: " + ", ".join(color_hex) + ".")
+        parts.append("Color palette: " + ", ".join(color_hex) + ".")
     parts.append(
-        "Vertical portrait 9:16 composition. Leave clean negative space in the "
-        "upper third for a title overlay and bottom right for a logo overlay. "
+        "Composition rules: clean negative space in the upper third for a title "
+        "overlay, bottom right corner relatively empty for a logo. "
         "Strictly no text, no letters, no numbers, no logos, no watermarks."
     )
     prompt = " ".join(parts)
-
-    # 🐱 同じプレイリストでも変化を出すためにseedを名前から決定論的に
-    seed = abs(hash(meta.playlist_id + meta.name)) % 999999
 
     url = (
         "https://image.pollinations.ai/prompt/"
         + urllib.parse.quote(prompt, safe="")
         + f"?width=1080&height=1920&model={urllib.parse.quote(model)}"
-        + f"&seed={seed}&nologo=true&enhance=true&private=true"
+        + f"&seed={seed}&nologo=true&enhance=true"
     )
 
-    print(f"[EnMP] Pollinations style='{style_desc[:60]}...' model={model} seed={seed}")
+    print(f"[EnMP] medium='{medium}' | style='{style_desc[:50]}...' | model={model} | seed={seed}")
+    print(f"[EnMP] prompt: {prompt}")
     print(f"[EnMP] Generating (30-120s)...")
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()

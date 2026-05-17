@@ -18,9 +18,10 @@ Spotify Developer Dashboardでアプリ登録して得られる Client ID / Secr
 ## できること
 
 - 公開プレイリストURLを1本入れるだけで縦サムネが完成
-- 背景アートは3パターンから選べる：
-  - `collage` (無料・API不要): ジャケ写をタイル状に並べてぼかしたmoodboard風背景。**確実に動く**
-  - `gemini` (`gemini-2.5-flash-image` = nano banana / `gemini-3-pro-image-preview` = pro): Gemini画像生成。**有料プラン必須**（フリーtierは現状不可）
+- 背景アートは4パターンから選べる：
+  - `collage` (無料・API不要): ジャケ写の色を抽出してジャケ写ぼかしブロブ＋角丸グリッドで合成
+  - `pollinations` (無料・認証不要のAI): https://pollinations.ai のFLUX/SDXLバックエンドにテキストプロンプトでAIイラストを描かせる。生成30-120秒
+  - `gemini` (`gemini-2.5-flash-image` = nano banana / `gemini-3-pro-image-preview` = pro): Gemini画像生成。**有料tier必須**（フリーtierは現状不可）
   - `openai` (`gpt-image-1`): ChatGPTと同じ画像生成。少額課金で利用可
 - 文字とSpotifyロゴはPILで合成するのでブランド表記が崩れない
 
@@ -42,8 +43,8 @@ Spotify Developer Dashboardでアプリ登録して得られる Client ID / Secr
 
 これで `.spotify_cache` にtokenが保存され、以降は自動で再利用される。
 
-`PROVIDER = "collage"` / `"gemini"` / `"openai"` を切り替えるだけで生成エンジンが切り替わる。
-無料で確実に動かしたいなら `"collage"` 一択。
+`PROVIDER = "collage"` / `"pollinations"` / `"gemini"` / `"openai"` を切り替えるだけで生成エンジンが切り替わる。
+無料で確実に動かしたいなら `"collage"`、無料でAIっぽいイラストが欲しいなら `"pollinations"`。
 
 ## ローカル（Python）で動かす
 
@@ -82,6 +83,7 @@ print(meta.name, "by", meta.owner, "/ genres:", meta.top_genres)
 | 用途 | 推奨 |
 |---|---|
 | 無料・確実に動かしたい | `PROVIDER="collage"` (API不要のローカル合成) |
+| 無料でAI生成イラストが欲しい | `PROVIDER="pollinations"` (認証不要のFLUX) |
 | 画質と質感重視 | `gemini-3-pro-image-preview` (nano banana pro, 有料) |
 | ChatGPTで揃えたい | `gpt-image-1` (OpenAI, 少額課金) |
 

@@ -402,6 +402,51 @@ def generate_background_collage(meta: PlaylistMeta) -> Image.Image:
     return canvas.convert("RGB")
 
 
+# ---------- Pollinations provider (free AI, no auth) ----------
+def generate_background_pollinations(
+    meta: PlaylistMeta,
+    model: str = "flux",
+    timeout: int = 180,
+) -> Image.Image:
+    """無料のpollinations.ai (裏はFLUX/SDXL等) で1080x1920背景を生成.
+
+    認証不要・課金不要。ジャケ写そのものは渡せないが、ジャケ写から抽出した
+    色とジャンル/タイトルをプロンプトにしてAIにmoodboardイラストを描かせる.
+    """
+    import urllib.parse
+
+    color_hex: List[str] = []
+    if meta.cover_images:
+        for r, g, b in _extract_dominant_colors(meta.cover_images, n=4):
+            color_hex.append(f"#{r:02x}{g:02x}{b:02x}")
+
+    genre_str = ", ".join(meta.top_genres[:5]) if meta.top_genres else "mixed mood"
+    color_str = ", ".join(color_hex) if color_hex else "vibrant"
+
+    prompt = (
+        f"Vertical 9:16 abstract artistic illustration for music playlist "
+        f"'{meta.name}', mood and genres: {genre_str}, "
+        f"color palette: {color_str}, "
+        f"style: stylish moodboard art, mixed media collage, surreal dreamy "
+        f"atmosphere, soft brush strokes, ethereal lighting, painterly. "
+        f"Composition: clean negative space in the upper third for a title overlay, "
+        f"and the bottom right corner relatively clean for a logo. "
+        f"Strictly do not render any text, letters, numbers, or logos."
+    )
+
+    url = (
+        "https://image.pollinations.ai/prompt/"
+        + urllib.parse.quote(prompt, safe="")
+        + f"?width=1080&height=1920&model={urllib.parse.quote(model)}"
+        + "&nologo=true&enhance=true&private=true"
+    )
+
+    print(f"[EnMP] Pollinations generating (this can take 30-120s)...")
+    r = requests.get(url, timeout=timeout)
+    r.raise_for_status()
+    return Image.open(io.BytesIO(r.content)).convert("RGB")
+
+
 # ---------- Gemini provider ----------
 def generate_background_gemini(
     meta: PlaylistMeta,
@@ -627,6 +672,8 @@ def make_thumbnail(
 
     if provider == "collage":
         bg = generate_background_collage(meta)
+    elif provider == "pollinations":
+        bg = generate_background_pollinations(meta)
     elif provider == "gemini":
         if not gemini_api_key:
             raise ValueError("gemini_api_key is required for provider='gemini'")
